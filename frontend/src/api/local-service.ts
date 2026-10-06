@@ -43,12 +43,24 @@ export function runAction(key: string, id: number, action: string): ActionResult
   if (current === target) {
     return { ok: false, message: `${meta.entity}已经是「${target}」，不用重复操作` }
   }
-  const lastStatus = meta.statuses[meta.statuses.length - 1]
+  const pending = meta.pendingStatuses
+    ? meta.pendingStatuses.includes(target)
+    : target !== meta.statuses[meta.statuses.length - 1]
+  const abnormal = meta.abnormalStatuses
+    ? meta.abnormalStatuses.includes(target)
+    : NEGATIVE_ACTIONS.some((verb) => action.startsWith(verb))
   const updated: EntryRow = {
     ...rows[index],
     status: target,
-    pending: target !== lastStatus,
-    abnormal: NEGATIVE_ACTIONS.some((verb) => action.startsWith(verb)),
+    pending,
+    abnormal,
+    _rev: Number(rows[index]._rev ?? 0) + 1,
+  }
+  // 「装置状态/调度状态」这类业务状态列与流转状态保持同一份，列表与详情才不会对不上。
+  for (const field of meta.fields) {
+    if (field.endsWith('状态')) {
+      updated[field] = target
+    }
   }
   const next = [...rows]
   next[index] = updated
@@ -84,8 +96,33 @@ export function downloadEntries(key: string): void {
   URL.revokeObjectURL(url)
 }
 
-export function loadOverview(): OverviewResult {
-  const rows = allRows()
+export function hydrologyStats(): { inflow: number; outflow: number; pending: number; today: string } {
+  const rows = listRows('hydrology')
+  const today = new Date().toISOString().slice(0, 10)
+  // 今日没有观测记录时按最新一条已观测/已调度记录汇总，页脚数字始终有来源。
+  const todays = rows.filter((row) => String(row['观测时间'] ?? '') === today)
+  const source = todays.length > 0
+    ? todays
+    : rows
+        .filter((row) => row.status === '已观测' || row.status === '已调度' || row.status === '已复核')
+        .sort((a, b) => String(b['观测时间'] ?? '').localeCompare(String(a['观测时间'] ?? '')))
+        .slice(0, 1)
+  const sum = (field: string) =>
+    source.reduce((total, row) => {
+      const num = Number(row[field])
+      return total + (Number.isFinite(num) ? num : 0)
+    }, 0)
+  const meta = MODULE_BY_KEY.get('hydrology')!
+  const pendingStatuses = meta.pendingStatuses ?? []
+  return {
+    inflow: sum('入库流量'),
+    outflow: sum('出库流量'),
+    pending: rows.filter((row) => pendingStatuses.includes(String(row.status))).length,
+    today,
+  }
+}
+
+export function loadOverview(): OverviewResult {  const rows = allRows()
   const modules = [...MODULE_BY_KEY.values()].map((meta) => {
     const entries = rows[meta.key] ?? []
     return {

@@ -3,18 +3,30 @@
     <header class="page-head">
       <div>
         <h2>调速器管理</h2>
-        <p class="page-desc">维护调速器，围绕装置编号、所属机组、油压值、导叶开度做登记、筛选与状态流转。</p>
+        <p class="page-desc">提交校验时油压值、导叶开度、接力器行程、开度限位与校验日期整笔入账；列表、详情与导出清单同读一份台账。</p>
       </div>
       <div class="page-actions">
-        <button class="btn primary" type="button" @click="openCreate">登记调速器</button>
+        <button class="btn" type="button" @click="showLedger = true">缺项补录台账{{ supplementedCount ? `（${supplementedCount} 台）` : '' }}</button>
         <button class="btn" type="button" @click="exportRows">导出调速器清单</button>
       </div>
     </header>
 
     <div class="stat-row">
-      <article v-for="item in stats" :key="item.label" class="stat-card">
-        <span class="stat-label">{{ item.label }}</span>
-        <strong class="stat-value">{{ item.value }}</strong>
+      <article class="stat-card">
+        <span class="stat-label">正常调速器</span>
+        <strong class="stat-value">{{ stats.normal }}</strong>
+      </article>
+      <article class="stat-card">
+        <span class="stat-label">待校验装置</span>
+        <strong class="stat-value">{{ stats.pending }}</strong>
+      </article>
+      <article class="stat-card">
+        <span class="stat-label">异常装置</span>
+        <strong class="stat-value">{{ stats.abnormal }}</strong>
+      </article>
+      <article class="stat-card">
+        <span class="stat-label">已停用 / 历史补录</span>
+        <strong class="stat-value">{{ stats.stopped }} / {{ stats.supplemented }}</strong>
       </article>
     </div>
 
@@ -43,35 +55,48 @@
       </thead>
       <tbody>
         <tr v-for="row in rows" :key="String(row.id)">
-          <td v-for="column in columns" :key="column">{{ row[column] ?? '—' }}</td>
+          <td v-for="column in columns" :key="column">
+            {{ row[column] === '' || row[column] == null ? '—' : row[column] }}
+            <span v-if="column === '装置编号' && row._supplemented" class="tag warn" title="该装置早期缺测读数已按统一口径补录">补</span>
+          </td>
           <td>{{ row.status }}</td>
           <td class="row-actions">
+            <button class="link" type="button" @click="openCheck(row)">提交校验</button>
             <button
-              v-for="action in actions"
-              :key="action"
-              class="link"
-              type="button"
-              @click="runAction(action, row)"
-            >
-              {{ action }}
-            </button>
+              v-if="row.status !== '已停用'"
+              class="link" type="button"
+              @click="runAction('标记异常', row)"
+            >标记异常</button>
+            <button
+              v-if="row.status !== '已停用'"
+              class="link" type="button"
+              @click="runAction('停用装置', row)"
+            >停用装置</button>
+            <button class="link" type="button" @click="openDetail(row)">详情</button>
           </td>
         </tr>
         <tr v-if="!rows.length">
-          <td :colspan="columns.length + 2" class="empty-state">暂无调速器数据，可先登记调速器</td>
+          <td :colspan="columns.length + 2" class="empty-state">暂无调速器数据</td>
         </tr>
       </tbody>
     </table>
 
     <footer class="page-foot">
-      <span>共 {{ total }} 条调速器记录</span>
+      <span>
+        共 {{ total }} 条调速器记录 · 待校验装置 <strong>{{ stats.pending }}</strong> 台
+        <template v-if="lastMessage"><span class="ok-text">｜{{ lastMessage }}</span></template>
+      </span>
       <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
     </footer>
+
+    <CheckDialog :open="checkOpen" :row="activeRow" @close="checkOpen = false" @done="onCheckDone" />
+    <DetailPanel :open="detailOpen" :row="activeRow" :nonce="detailNonce" @close="detailOpen = false" />
+    <SupplementLedger :open="showLedger" :nonce="detailNonce" @close="showLedger = false" />
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onActivated, onMounted, ref } from 'vue'
 
 import {
   downloadEntries,
@@ -79,25 +104,44 @@ import {
   moduleMeta,
   runAction as applyAction,
 } from '@/api/local-service'
+import { governorStats } from '@/api/governor-service'
 import type { EntryRow } from '@/data/types'
+import CheckDialog from './CheckDialog.vue'
+import DetailPanel from './DetailPanel.vue'
+import SupplementLedger from './SupplementLedger.vue'
 
 const meta = moduleMeta('governor')
-const columns = ["装置编号", "所属机组", "油压值", "导叶开度", "接力器行程", "开度限位", "校验日期", "装置状态"]
-const actions = ["提交校验", "标记异常", "停用装置"]
-const statuses = ["待校验", "正常", "异常", "已停用"]
-const stats = [{"label": "正常调速器", "value": 0}, {"label": "待校验装置", "value": 0}, {"label": "异常装置", "value": 0}]
+const columns = meta.fields
+const statuses = meta.statuses
+const filterFields = columns.slice(0, 3)
 
 const rows = ref<EntryRow[]>([])
 const total = ref(0)
 const errorMessage = ref('')
+const lastMessage = ref('')
 const filters = ref<Record<string, string>>({})
-const filterFields = columns.slice(0, 3)
+
+const checkOpen = ref(false)
+const detailOpen = ref(false)
+const showLedger = ref(false)
+const activeRow = ref<EntryRow | null>(null)
+const detailNonce = ref(0)
+
+// 统计始终从已提交的台账实时算，提交完、联动完、刷新回来都跟着变。
+const stats = ref(governorStats())
+const supplementedCount = computed(() => stats.value.supplemented)
+
 const statusSummary = computed(() =>
   statuses.map((status: string) => ({
     status,
     count: rows.value.filter((row) => String(row.status) === status).length,
   })),
 )
+
+function refreshStats() {
+  stats.value = governorStats()
+  detailNonce.value += 1
+}
 
 function resetFilters() {
   filters.value = {}
@@ -108,18 +152,37 @@ function exportRows() {
   downloadEntries(meta.key)
 }
 
-function openCreate() {
-  errorMessage.value = '调速器登记入口尚未接入审批流'
+function openCheck(row: EntryRow) {
+  errorMessage.value = ''
+  lastMessage.value = ''
+  activeRow.value = row
+  checkOpen.value = true
+}
+
+function openDetail(row: EntryRow) {
+  activeRow.value = row
+  detailOpen.value = true
+  detailNonce.value += 1
+}
+
+function onCheckDone(message: string) {
+  checkOpen.value = false
+  lastMessage.value = message
+  reload()
+  refreshStats()
 }
 
 function runAction(action: string, row: EntryRow) {
   errorMessage.value = ''
+  lastMessage.value = ''
   const result = applyAction(meta.key, Number(row.id), action)
   if (!result.ok) {
     errorMessage.value = result.message
     return
   }
+  lastMessage.value = result.message
   reload()
+  refreshStats()
 }
 
 function reload() {
@@ -128,10 +191,19 @@ function reload() {
     const payload = listEntries(meta.key, filters.value)
     rows.value = payload.items
     total.value = payload.total
+    refreshStats()
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '调速器列表读取失败'
   }
 }
 
 onMounted(reload)
+// 没有 keep-alive 时 onActivated 不会触发；保留它是为了将来从详情/其他页返回时强制对一次账。
+onActivated(reload)
 </script>
+
+<style scoped>
+.tag { display: inline-block; margin-left: 4px; border-radius: 4px; padding: 0 5px; font-size: 11px; line-height: 16px; }
+.tag.warn { background: #fef3c7; color: #92400e; }
+.ok-text { color: #15803d; }
+</style>

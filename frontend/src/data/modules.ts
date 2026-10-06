@@ -34,6 +34,11 @@ export const MODULES: ModuleMeta[] = [
     actions: ["提交校验", "标记异常", "停用装置"],
     actionTargets: {"提交校验": "正常", "标记异常": "异常", "停用装置": "已停用"},
     metrics: ["正常调速器", "待校验装置", "异常装置"],
+    // 只有还没校验过的装置算待办；校验后再标记异常不算「待校验」。
+    pendingStatuses: ["待校验"],
+    abnormalStatuses: ["异常"],
+    // 提交校验是整笔事务：油压值/导叶开度/接力器行程/开度限位/校验日期随状态一起落库。
+    txActions: ["提交校验"],
   },
   {
     key: "excitation",
@@ -144,6 +149,9 @@ export const MODULES: ModuleMeta[] = [
     actions: ["提交观测", "下达调度", "提交复核"],
     actionTargets: {"提交观测": "已观测", "下达调度": "已调度", "提交复核": "已复核"},
     metrics: ["今日入库流量", "今日出库流量", "待调度记录"],
+    // 待调度 = 还在等调度动作的记录（待观测、已观测）；已调度/已复核都不算待办。
+    pendingStatuses: ["待观测", "已观测"],
+    abnormalStatuses: [],
   },
   {
     key: "flood",

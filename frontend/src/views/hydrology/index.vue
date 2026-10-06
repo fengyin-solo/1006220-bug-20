@@ -43,8 +43,11 @@
       </thead>
       <tbody>
         <tr v-for="row in rows" :key="String(row.id)">
-          <td v-for="column in columns" :key="column">{{ row[column] ?? '—' }}</td>
-          <td>{{ row.status }}</td>
+          <td v-for="column in columns" :key="column">{{ row[column] === '' || row[column] == null ? '—' : row[column] }}</td>
+          <td>
+            {{ row.status }}
+            <span v-if="row['联动说明']" class="link-tag" :title="String(row['联动说明'])">联动</span>
+          </td>
           <td class="row-actions">
             <button
               v-for="action in actions"
@@ -64,7 +67,7 @@
     </table>
 
     <footer class="page-foot">
-      <span>共 {{ total }} 条水情调度记录</span>
+      <span>共 {{ total }} 条水情记录 · 待调度 <strong>{{ stats[2].value }}</strong> 条（调速器校验通过同日会联动销项）</span>
       <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
     </footer>
   </section>
@@ -75,6 +78,7 @@ import { computed, onMounted, ref } from 'vue'
 
 import {
   downloadEntries,
+  hydrologyStats,
   listEntries,
   moduleMeta,
   runAction as applyAction,
@@ -85,12 +89,16 @@ const meta = moduleMeta('hydrology')
 const columns = ["记录编号", "观测时间", "上游水位", "下游水位", "入库流量", "出库流量", "值守人员", "调度状态"]
 const actions = ["提交观测", "下达调度", "提交复核"]
 const statuses = ["待观测", "已观测", "已调度", "已复核"]
-const stats = [{"label": "今日入库流量", "value": 0}, {"label": "今日出库流量", "value": 0}, {"label": "待调度记录", "value": 0}]
 
 const rows = ref<EntryRow[]>([])
 const total = ref(0)
 const errorMessage = ref('')
 const filters = ref<Record<string, string>>({})
+const stats = ref([
+  { label: '今日入库流量(m³/s)', value: 0 },
+  { label: '今日出库流量(m³/s)', value: 0 },
+  { label: '待调度记录', value: 0 },
+])
 const filterFields = columns.slice(0, 3)
 const statusSummary = computed(() =>
   statuses.map((status: string) => ({
@@ -128,6 +136,12 @@ function reload() {
     const payload = listEntries(meta.key, filters.value)
     rows.value = payload.items
     total.value = payload.total
+    const summary = hydrologyStats()
+    stats.value = [
+      { label: '今日入库流量(m³/s)', value: summary.inflow },
+      { label: '今日出库流量(m³/s)', value: summary.outflow },
+      { label: '待调度记录', value: summary.pending },
+    ]
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '水情调度列表读取失败'
   }
@@ -135,3 +149,7 @@ function reload() {
 
 onMounted(reload)
 </script>
+
+<style scoped>
+.link-tag { display: inline-block; margin-left: 4px; background: #e0e7ff; color: #3730a3; border-radius: 4px; padding: 0 5px; font-size: 11px; line-height: 16px; }
+</style>
