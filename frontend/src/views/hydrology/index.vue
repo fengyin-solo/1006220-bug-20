@@ -65,33 +65,61 @@
 
     <footer class="page-foot">
       <span>共 {{ total }} 条水情调度记录</span>
+      <span>待调度记录含调速器待校验装置 {{ governorPending }} 台（跨模块联动）</span>
       <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
     </footer>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import {
+  countStatus,
   downloadEntries,
   listEntries,
   moduleMeta,
   runAction as applyAction,
+  today,
 } from '@/api/local-service'
+import { listRows, storageKey } from '@/data/local-store'
 import type { EntryRow } from '@/data/types'
 
 const meta = moduleMeta('hydrology')
 const columns = ["记录编号", "观测时间", "上游水位", "下游水位", "入库流量", "出库流量", "值守人员", "调度状态"]
 const actions = ["提交观测", "下达调度", "提交复核"]
 const statuses = ["待观测", "已观测", "已调度", "已复核"]
-const stats = [{"label": "今日入库流量", "value": 0}, {"label": "今日出库流量", "value": 0}, {"label": "待调度记录", "value": 0}]
 
 const rows = ref<EntryRow[]>([])
+// 全量快照：统计卡与联动待办都基于它，与调速器模块读的是同一份本地数据。
+const snapshot = ref<EntryRow[]>([])
+const governorPending = ref(0)
 const total = ref(0)
 const errorMessage = ref('')
 const filters = ref<Record<string, string>>({})
 const filterFields = columns.slice(0, 3)
+
+function sumToday(field: string): number {
+  const todayText = today()
+  return snapshot.value
+    .filter((row) => String(row['观测时间']) === todayText)
+    .reduce((sum, row) => {
+      const value = Number(String(row[field] ?? '').trim())
+      return sum + (Number.isFinite(value) ? value : 0)
+    }, 0)
+}
+
+const stats = computed(() => {
+  // 待调度 = 水情侧还没下达调度的记录 + 调速器待校验装置：校验结论一出，这里跟着变。
+  const pendingHydro = snapshot.value.filter((row) =>
+    ['待观测', '已观测'].includes(String(row.status)),
+  ).length
+  return [
+    { label: '今日入库流量', value: sumToday('入库流量') },
+    { label: '今日出库流量', value: sumToday('出库流量') },
+    { label: '待调度记录', value: pendingHydro + governorPending.value },
+  ]
+})
 const statusSummary = computed(() =>
   statuses.map((status: string) => ({
     status,
@@ -125,6 +153,8 @@ function runAction(action: string, row: EntryRow) {
 function reload() {
   errorMessage.value = ''
   try {
+    snapshot.value = [...listRows(meta.key)]
+    governorPending.value = countStatus('governor', '待校验')
     const payload = listEntries(meta.key, filters.value)
     rows.value = payload.items
     total.value = payload.total
@@ -133,5 +163,18 @@ function reload() {
   }
 }
 
-onMounted(reload)
+function onStorage(event: StorageEvent) {
+  if (event.key === storageKey()) {
+    reload()
+  }
+}
+
+onMounted(() => {
+  reload()
+  window.addEventListener('storage', onStorage)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('storage', onStorage)
+})
 </script>
